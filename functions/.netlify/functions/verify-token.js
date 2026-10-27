@@ -1,115 +1,83 @@
-/**
- * Serverless Function - Token Verification
- *
- * This function handles token verification by proxying the request
- * to the Salla exchange authority service.
- */
 
-// Environment-based API URLs
-const VERIFY_API_URLS = {
-  dev: "https://exchange-authority-service-dev-62.merchants.workers.dev/exchange-authority/v1/verify",
-  prod: "https://api.salla.dev/exchange-authority/v1/verify",
-};
+const APP_ID = "2062402735";
+const VERIFY_URL =
+  "https://api.salla.dev/exchange-authority/v1/verify";
 
-exports.handler = async (event, _context) => {
-  // Only allow POST requests
-  if (event.httpMethod !== "POST") {
-    return {
-      statusCode: 405,
-      body: JSON.stringify({ error: "Method not allowed" }),
-    };
+function json(data, status = 200) {
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: {
+      "Content-Type": "application/json; charset=utf-8",
+      "Cache-Control": "no-store",
+      "X-Content-Type-Options": "nosniff"
+    }
+  });
+}
+
+export function onRequestGet() {
+  return json({
+    success: false,
+    error: "Method not allowed"
+  }, 405);
+}
+
+export async function onRequestPost({ request }) {
+  const url = new URL(request.url);
+
+  if (request.headers.get("Origin") !== url.origin) {
+    return json({ success: false, error: "Forbidden" }, 403);
+  }
+
+  if (!(request.headers.get("Content-Type") || "")
+      .toLowerCase().startsWith("application/json")) {
+    return json({ success: false, error: "JSON required" }, 415);
   }
 
   try {
-    // Parse request body
-    const body = JSON.parse(event.body || "{}");
-    const { token, iss, subject, appId } = body;
+    const raw = await request.text();
 
-    // Validate required fields
-    const jsonHeaders = { "Content-Type": "application/json" };
-
-    if (!token) {
-      return {
-        statusCode: 400,
-        headers: jsonHeaders,
-        body: JSON.stringify({ success: false, error: "Token is required" }),
-      };
+    if (raw.length > 20000) {
+      return json({ success: false, error: "Request too large" }, 413);
     }
 
-    // Validate app ID
-    if (!appId) {
-      return {
-        statusCode: 400,
-        headers: jsonHeaders,
-        body: JSON.stringify({ success: false, error: "App ID is required" }),
-      };
+    const body = JSON.parse(raw);
+    const token = body?.token;
+    const appId = String(body?.appId || "");
+
+    if (
+      typeof token !== "string" ||
+      token.length < 16 ||
+      token.length > 16384 ||
+      !/^[A-Za-z0-9._-]+$/.test(token) ||
+      appId !== APP_ID
+    ) {
+      return json({ success: false, error: "Invalid request" }, 400);
     }
 
-    // Determine environment (default to 'dev' when ENV is not set, e.g. local netlify dev)
-    const environment = process.env.ENV || "dev";
-
-    // Get API URL based on environment
-    const apiUrl = VERIFY_API_URLS[environment];
-    if (!apiUrl) {
-      return {
-        statusCode: 400,
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          success: false,
-          error: `Invalid environment: ${environment}. Must be 'dev' or 'prod'`,
-        }),
-      };
-    }
-
-    // Debug log request details
-    console.log("Verifying token with Salla API", {
-      apiUrl: apiUrl,
-      appId,
-      token: token ? "[REDACTED]" : undefined,
-      iss: iss || "merchant-dashboard",
-      subject: subject || "embedded-page",
-      env: environment,
-    });
-
-    // Make request to Salla API
-    const response = await fetch(apiUrl, {
+    const response = await fetch(VERIFY_URL, {
       method: "POST",
       headers: {
-        "s-source": appId, // APP ID (dynamic)
+        "S-Source": APP_ID,
         "Content-Type": "application/json",
+        "Accept": "application/json"
       },
       body: JSON.stringify({
         token,
-        iss: iss || "merchant-dashboard",
-        subject: subject || "embedded-page",
-        env: environment,
+        iss: "merchant-dashboard",
+        subject: "embedded-page",
+        env: "prod"
       }),
+      signal: AbortSignal.timeout(10000)
     });
-
-    // Debug log response status
-    console.log("Salla API response status:", response.status);
 
     const result = await response.json();
 
-    // Return the result with appropriate status code
-    return {
-      statusCode: response.status,
-      headers: {
-        "Content-Type": "application/json",
-        "Access-Control-Allow-Origin": "*", // Allow CORS
-        "Access-Control-Allow-Headers": "Content-Type",
-      },
-      body: JSON.stringify(result),
-    };
-  } catch (error) {
-    console.error("Token verification error:", error);
-    return {
-      statusCode: 500,
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        success: false,
-        error: error.message || "Internal server error",
-      }),
-    };
+    return json(result, response.status);
+
+  } catch {
+    return json({
+      success: false,
+      error: "Verification service unavailable"
+    }, 502);
   }
-};
+}
